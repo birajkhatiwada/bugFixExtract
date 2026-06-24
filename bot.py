@@ -1,6 +1,7 @@
 import os
 import re
 import discord
+from discord import app_commands
 import requests
 from dotenv import load_dotenv
 
@@ -9,14 +10,13 @@ load_dotenv()
 DISCORD_TOKEN = os.getenv("DISCORD_TOKEN")
 GITHUB_TOKEN = os.getenv("GITHUB_TOKEN")
 
-# Matches GitHub PR URLs: github.com/{owner}/{repo}/pull/{number}
 PR_URL_PATTERN = re.compile(
     r"https://github\.com/([^/\s]+)/([^/\s]+)/pull/(\d+)"
 )
 
 intents = discord.Intents.default()
-intents.message_content = True
 client = discord.Client(intents=intents)
+tree = app_commands.CommandTree(client)
 
 
 def fetch_pr(owner: str, repo: str, pr_number: str) -> dict | None:
@@ -40,7 +40,6 @@ def build_embed(pr: dict, pr_url: str) -> discord.Embed:
     base_branch = pr.get("base", {}).get("ref", "")
     head_branch = pr.get("head", {}).get("ref", "")
 
-    # Truncate long descriptions to fit Discord's 4096 char embed limit
     if len(body) > 1000:
         body = body[:1000] + "\n\n_[description truncated — click link to read more]_"
 
@@ -56,35 +55,34 @@ def build_embed(pr: dict, pr_url: str) -> discord.Embed:
     return embed
 
 
+@tree.command(name="bfe", description="Pull bug fix PR info from a GitHub PR link")
+@app_commands.describe(link="GitHub PR URL")
+async def bfe(interaction: discord.Interaction, link: str):
+    match = PR_URL_PATTERN.search(link)
+    if not match:
+        await interaction.response.send_message("That doesn't look like a valid GitHub PR link.", ephemeral=True)
+        return
+
+    await interaction.response.defer()
+
+    owner, repo, pr_number = match.groups()
+    pr_url = f"https://github.com/{owner}/{repo}/pull/{pr_number}"
+    pr = fetch_pr(owner, repo, pr_number)
+
+    if pr is None:
+        await interaction.followup.send("Could not fetch PR info — check that the GitHub token has access.")
+        return
+
+    embed = build_embed(pr, pr_url)
+    await interaction.followup.send(embed=embed)
+
+
 @client.event
 async def on_ready():
+    for guild in client.guilds:
+        await tree.sync(guild=guild)
+    await tree.sync()
     print(f"Bot ready — logged in as {client.user}")
-
-
-@client.event
-async def on_message(message: discord.Message):
-    # Ignore messages from the bot itself
-    if message.author == client.user:
-        return
-
-    matches = PR_URL_PATTERN.findall(message.content)
-    if not matches:
-        return
-
-    # Handle up to 3 PR links per message to avoid spam
-    for owner, repo, pr_number in matches[:3]:
-        pr_url = f"https://github.com/{owner}/{repo}/pull/{pr_number}"
-        pr = fetch_pr(owner, repo, pr_number)
-
-        if pr is None:
-            await message.reply(
-                f"Could not fetch PR info for {pr_url} — check that the GitHub token has access.",
-                mention_author=False,
-            )
-            continue
-
-        embed = build_embed(pr, pr_url)
-        await message.reply(embed=embed, mention_author=False)
 
 
 if __name__ == "__main__":
